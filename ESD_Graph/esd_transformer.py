@@ -1,5 +1,5 @@
-from structures.esd_graph import ESD_graph, ESD_Node
-from structures.temporal_graph import Temporal_edge
+from .structures.esd_graph import ESD_graph, ESD_Node
+from .structures.temporal_graph import Temporal_edge
 from typing import List, Tuple
 import collections
 
