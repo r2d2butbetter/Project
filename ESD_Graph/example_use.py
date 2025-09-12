@@ -1,5 +1,9 @@
-from esd_transformer import transform_temporal_to_esd
-from structures.temporal_graph import Temporal_edge
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from ESD_Graph.esd_transformer import transform_temporal_to_esd
+from ESD_Graph.structures.temporal_graph import Temporal_edge
 
 if __name__ == "__main__":
     # Define the temporal graph G from the image.
