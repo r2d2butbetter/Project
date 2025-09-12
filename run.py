@@ -5,10 +5,10 @@ from matplotlib.animation import FuncAnimation
 import datetime
 
 # Load dataset
-df = pd.read_csv("network_temporal_day.csv", sep=";")
+df = pd.read_csv("Datasets/network_temporal_day.csv", sep=",")
 
-# Load only the first 1000 lines
-df = pd.read_csv("network_temporal_day.csv", sep=";", nrows=10)
+# Load only the first 10 lines
+df = pd.read_csv("Datasets/network_temporal_day.csv", sep=",", nrows=10)
 
 # Convert Unix timestamps to datetime (optional for clarity)
 df["dep_time"] = pd.to_datetime(df["dep_time_ut"], unit="s")
