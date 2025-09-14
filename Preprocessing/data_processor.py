@@ -1,78 +1,115 @@
-
-# process_dataset.py
-
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import pandas as pd
-import io
-from ESD_Graph.esd_transformer import transform_temporal_to_esd #not the transformer u think
+import json
+from ESD_Graph.esd_transformer import transform_temporal_to_esd
 
-
-#TODO: Use a dataset to load and work with
-DATASET_STRING = """from_stop_I;to_stop_I;dep_time_ut;arr_time_ut;route_type;trip_I;seq;route_I
-2421;2422;1481485740;1481485779;3;1;1;1
-2422;7516;1481485779;1481485814;3;1;2;1
-7516;7275;1481485814;1481485860;3;1;3;1
-7275;3860;1481485860;1481485892;3;1;4;1
-3860;5513;1481485892;1481485928;3;1;5;1
-5513;4294;1481485928;1481485951;3;1;6;1
-4294;3391;1481485951;1481485995;3;1;7;1
-3391;4468;1481485995;1481486015;3;1;8;1
-4468;3688;1481486015;1481486040;3;1;9;1
-3688;4054;1481486040;1481486074;3;1;10;1
-4054;2423;1481486074;1481486108;3;1;11;1
-"""
-
-def main():
+def process_network_data(csv_file_path: str, output_file: str = None, num_rows: int = None):
     """
-    Main function to load, process, and transform the dataset.
-    """
-    # --- Step 1: Load the data from the string into a pandas DataFrame ---
-    print("--- Loading Dataset ---")
-    # Use io.StringIO to let pandas read the string as if it were a file
-    df = pd.read_csv(io.StringIO(DATASET_STRING), sep=';')
-    print(f"Successfully loaded {len(df)} records from the dataset.")
-
-    # --- Step 2: Prepare the data for the transformation function ---
-    # The function needs a list of tuples in the format: (u, v, t, λ)
-    # where u/v are vertices, t is departure time, and λ is duration.
-    print("\n--- Preparing Temporal Edges for Transformation ---")
+    Process the network temporal data from CSV and convert to ESD graph.
     
+    Args:
+        csv_file_path: Path to the CSV file
+        output_file: Optional path to save the ESD graph data
+        num_rows: Optional limit on number of rows to process
+    
+    Returns:
+        ESD_graph object
+    """
+    # Load the CSV data
+    try:
+        if num_rows:
+            df = pd.read_csv(csv_file_path, nrows=num_rows)
+            print(f"Loaded {num_rows} records from dataset")
+        else:
+            df = pd.read_csv(csv_file_path)
+            print(f"Loaded {len(df)} records from dataset")
+        
+    except FileNotFoundError:
+        print(f"Error: Dataset not found at {csv_file_path}")
+        return None
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return None
+    
+    # Convert to temporal edges format
     temporal_edges_list = []
+    skipped_count = 0
+    
     for index, row in df.iterrows():
-        # The transformation logic requires duration (λ), not arrival time.
-        # We calculate it: λ = arrival_time - departure_time
+        # Calculate duration
         duration = row['arr_time_ut'] - row['dep_time_ut']
         
-        # As per the original spec, duration λ must be a positive integer.
+        # Skip invalid durations
         if duration <= 0:
-            print(f"Warning: Skipping record at index {index} with non-positive duration.")
+            skipped_count += 1
             continue
         
-        # Create the tuple. We convert stop IDs to strings for robustness,
-        # as some systems have non-numeric stop IDs.
+        # Create temporal edge tuple (u, v, t, λ)
         edge_tuple = (
-            str(row['from_stop_I']),
-            str(row['to_stop_I']),
-            int(row['dep_time_ut']),
-            int(duration)
+            str(row['from_stop_I']),  # source vertex
+            str(row['to_stop_I']),    # destination vertex
+            int(row['dep_time_ut']),   # departure time
+            int(duration)              # travel duration
         )
         temporal_edges_list.append(edge_tuple)
     
-    print(f"Prepared {len(temporal_edges_list)} valid temporal edges.")
-
-    # --- Step 3: Call the transformation function from our library file ---
-    # This imports and runs the core logic from `esd_transformer.py`
-    print("\n--- Calling ESD Transformation Logic ---")
+    if skipped_count > 0:
+        print(f"Skipped {skipped_count} invalid edges")
+    
+    # Transform to ESD Graph
     esd_graph = transform_temporal_to_esd(temporal_edges_list)
+    
+    # Save data if output file specified
+    if output_file:
+        print(f"Saving ESD graph data to: {output_file}")
+        save_esd_graph_data(esd_graph, temporal_edges_list, output_file)
+    
+    print(f"ESD Graph created with {len(esd_graph.nodes)} nodes and {sum(len(neighbors) for neighbors in esd_graph.adj.values())} edges")
+    
+    return esd_graph
 
-    # --- Step 4: Display the final results ---
-    print("\n" + "="*40)
-    print("  RESULT: ESD Graph from Dataset  ")
-    print("="*40)
-    print(esd_graph)
-    print("="*40)
+def save_esd_graph_data(esd_graph, temporal_edges_list, output_file):
+    """Save ESD graph data to JSON file for later use"""
+    # Prepare data for JSON serialization
+    graph_data = {
+        'nodes': {},
+        'adjacency': {},
+        'levels': esd_graph.levels,
+        'temporal_edges': temporal_edges_list
+    }
+    
+    # Convert nodes to serializable format
+    for node_id, node in esd_graph.nodes.items():
+        graph_data['nodes'][node_id] = {
+            'original_edge_id': node.original_edge_id,
+            'u': node.u,
+            'v': node.v,
+            't': node.t,
+            'a': node.a
+        }
+    
+    # Convert adjacency list to serializable format
+    for node_id, neighbors in esd_graph.adj.items():
+        graph_data['adjacency'][node_id] = list(neighbors)
+    
+    with open(output_file, 'w') as f:
+        json.dump(graph_data, f, indent=2)
+
+def main():
+    """Main function to run the data processor"""
+    # Configuration
+    CSV_FILE = "Datasets/network_temporal_day.csv"
+    OUTPUT_FILE = "esd_graph_data.json"
+    NUM_ROWS = None  # Set to None for full dataset, or a number to limit
+    
+    # Process the data
+    esd_graph = process_network_data(CSV_FILE, OUTPUT_FILE, NUM_ROWS)
+    
+    if esd_graph:
+        print("\n--- Sample ESD Graph Structure ---")
+        print(esd_graph)
 
 if __name__ == "__main__":
     main()
