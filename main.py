@@ -129,7 +129,7 @@ def run_pipeline(dataset_path: str, source_node: str, num_rows: int = None):
 if __name__ == "__main__":
     DATASET_FILE = "Datasets/network_temporal_day.csv"
     SOURCE_VERTEX = "2421"
-    NUM_ROWS_TO_PROCESS = 10000  # Try 50000 for larger dataset where GPU shines
+    NUM_ROWS_TO_PROCESS = 100000
     
     print(f"🔧 Configuration: Processing {NUM_ROWS_TO_PROCESS} temporal edges")
     print("💡 Note: GPU excels with larger datasets (try 50000+ rows)")
