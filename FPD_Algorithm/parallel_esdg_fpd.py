@@ -4,23 +4,27 @@ import logging
 import time
 from ESD_Graph.structures.esd_graph import ESD_graph
 
-# --- CUDA Kernel Definition ---
-# This kernel implements Algorithm 1 (Multiple Breadth-First Search) from the paper.
-# Processes one BFS frontier in parallel for each source node phase.
-BFS_KERNEL = cp.RawKernel(r'''
+# --- Optimized CUDA Kernel ---
+# Implements Algorithm 1 (MBFS) with optimizations.
+# Key changes:
+# 1. Atomic Packed Update: Packs journey_time (high 32) and predecessor (low 32) 
+#    into a single 64-bit int to ensure atomic consistency.
+# 2. Sparse Queue: Uses atomicAdd to build the next frontier sparsely, avoiding 
+#    expensive dense scans.
+BFS_KERNEL_OPTIMIZED = cp.RawKernel(r'''
 extern "C" __global__
 void bfs_kernel(
-    const int frontier_size,        // Number of nodes in current frontier
-    const int* frontier_nodes,      // Current frontier node indices
-    const int* nodes_v,             // Destination vertex of each node
-    const int* nodes_a,             // Arrival time of each node
-    const int source_departure,     // Departure time of source node for this phase
-    const int* adj_indptr,          // CSR adjacency pointers
-    const int* adj_indices,         // CSR adjacency indices
-    int* journey_times,             // Global journey times array
-    int* status,                    // Node visited status (0=false, 1=true)
-    int* next_frontier,             // Next frontier markers (0=false, 1=true)
-    int* predecessors               // For path reconstruction
+    const int frontier_size,        // Size of current frontier
+    const int* frontier_nodes,      // Sparse list of current nodes
+    const int* nodes_v,             // Dest vertex (right(x))
+    const int* nodes_a,             // Arrival time (arr(x))
+    const int source_departure,     // Source departure (dep(z))
+    const int* adj_indptr,          // CSR pointers
+    const int* adj_indices,         // CSR indices
+    unsigned long long* packed_results, // High 32: time, Low 32: predecessor
+    int* status,                    // Global visited status
+    int* next_frontier,             // Next frontier sparse array
+    int* next_frontier_count        // Counter for next frontier size
 ) {
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
     
@@ -30,26 +34,31 @@ void bfs_kernel(
     int dest_vertex = nodes_v[node_idx];
     int arrival_time = nodes_a[node_idx];
     
-    // Compute journey time: arrival - source_departure
+    // 1. Calculate Journey Time: arr(x) - dep(z)
     int journey_time = arrival_time - source_departure;
     
-    // Update minimum journey time atomically (Line 7 in Algorithm 1)
-    int old_time = atomicMin(&journey_times[dest_vertex], journey_time);
-    if (journey_time < old_time) {
-        predecessors[dest_vertex] = node_idx;
-    }
+    // 2. Atomic Packed Update (Fixes Race Condition)
+    // Pack time and predecessor into one 64-bit int to update atomically.
+    // Time must be unsigned for comparison logic to work with ULL.
+    // Assuming positive times.
+    unsigned long long new_val = ((unsigned long long)journey_time << 32) | node_idx;
+    atomicMin(&packed_results[dest_vertex], new_val);
     
-    // Explore neighbors (Lines 8-9 in Algorithm 1)
+    // 3. Explore Neighbors 
     int start_edge = adj_indptr[node_idx];
     int end_edge = adj_indptr[node_idx + 1];
     
     for (int i = start_edge; i < end_edge; ++i) {
         int neighbor_idx = adj_indices[i];
         
-        // Atomic compare-and-swap to mark unvisited neighbors (Line 9)
-        // Use atomicCAS with integers (0=false, 1=true)
+        // 4. Pruning via atomicCAS
+        // "Ignore already visited nodes since they cannot offer a shorter journey time"
         if (atomicCAS(&status[neighbor_idx], 0, 1) == 0) {
-            next_frontier[neighbor_idx] = 1;  // Mark for next frontier
+            
+            // 5. Sparse Queue Insertion 
+            // "Reserve necessary space... using atomicAdd"
+            int queue_pos = atomicAdd(next_frontier_count, 1);
+            next_frontier[queue_pos] = neighbor_idx;
         }
     }
 }
@@ -57,15 +66,15 @@ void bfs_kernel(
 
 class ParallelESDG_FPD:
     """
-    GPU-accelerated implementation of FPD using CuPy.
-    Implements Phase 1 (Kernel Dev) and Phase 2 (Memory Layout) of the user plan.
+    GPU-accelerated FPD Solver implementing Algorithm 1 (MBFS).
+    Includes optimizations for Sparse Queues and Atomic 64-bit updates.
     """
 
     def __init__(self, esd_graph: ESD_graph):
         self.original_graph = esd_graph
         self.num_nodes = len(esd_graph.nodes)
         
-        # Determine max vertex ID for sizing the journey_times array
+        # Determine max vertex ID for sizing arrays
         self.max_vertex_id = 0
         if self.num_nodes > 0:
             max_u = max(int(n.u) for n in esd_graph.nodes.values())
@@ -77,213 +86,214 @@ class ParallelESDG_FPD:
 
     def _prepare_gpu_data(self):
         """
-        Phase 1 & 2: Memory Management & Coalescing.
-        Flattens the graph into SoA (Structure of Arrays) and sorts by level
-        to ensure memory coalescing during kernel execution.
+        Prepares SoA (Structure of Arrays) and CSR format.
+        Note: For full compliance, nodes should be relabeled by Level-Order
+        here to enable Memory Coalescing.
         """
         t0 = time.perf_counter()
         
-        # 1. Create node mapping (no need to sort by levels for Algorithm 1)
-        # We need a mapping from original_id -> gpu_index (0 to N-1)
+        # 1. Node Mapping (Arbitrary order for now)
         sorted_node_ids = list(self.original_graph.nodes.keys())
-        
         self.id_map = {original: i for i, original in enumerate(sorted_node_ids)}
         
-        # 2. Build Structure of Arrays (SoA) for Nodes
-        # We only need 'v' and 'a' on GPU for the forward pass. 
-        # 'u' and 't' are only needed for source initialization on CPU.
+        # 2. Build Arrays
         nodes_v = np.zeros(self.num_nodes, dtype=np.int32)
         nodes_a = np.zeros(self.num_nodes, dtype=np.int32)
-        nodes_u_cpu = np.zeros(self.num_nodes, dtype=np.int32) # Keep on CPU for init
-        nodes_t_cpu = np.zeros(self.num_nodes, dtype=np.int32) # Keep on CPU for init
+        nodes_u_cpu = np.zeros(self.num_nodes, dtype=np.int32)
+        nodes_t_cpu = np.zeros(self.num_nodes, dtype=np.int32)
         
-        # Build node arrays without level tracking
         for i, original_id in enumerate(sorted_node_ids):
             node = self.original_graph.nodes[original_id]
-            
             nodes_v[i] = int(node.v)
             nodes_a[i] = int(node.a)
             nodes_u_cpu[i] = int(node.u)
             nodes_t_cpu[i] = int(node.t)
         
-        # 3. Build CSR (Compressed Sparse Row) for Adjacency
-        # This is optimized for the 'Graph Traversal' kernel phase
+        # 3. CSR Adjacency
         adj_indices_list = []
         adj_indptr = [0]
         
         for original_id in sorted_node_ids:
-            # Get neighbors (original IDs)
             neighbors = self.original_graph.adj.get(original_id, [])
-            # Convert to GPU indices
             mapped_neighbors = [self.id_map[n] for n in neighbors if n in self.id_map]
-            
             adj_indices_list.extend(mapped_neighbors)
             adj_indptr.append(len(adj_indices_list))
             
-        # 4. Transfer to GPU (CuPy Arrays) - Use asarray for better performance
+        # 4. Transfer to GPU
         self.d_nodes_v = cp.asarray(nodes_v)
         self.d_nodes_a = cp.asarray(nodes_a)
         self.d_adj_indices = cp.asarray(adj_indices_list, dtype=np.int32)
         self.d_adj_indptr = cp.asarray(adj_indptr, dtype=np.int32)
         
-        # Keep these on CPU for source initialization logic
+        # Keep source logic on CPU
         self.h_nodes_u = nodes_u_cpu
         self.h_nodes_t = nodes_t_cpu
         
         t1 = time.perf_counter()
         logging.info(f"GPU Data Preparation complete in {t1-t0:.4f}s")
-    
-    def _reconstruct_paths_cpu_optimized(self, predecessors, source_vertex_int, result_times):
+
+    def _reconstruct_paths_cpu(self, predecessors, result_times, source_vertex_int):
         """
-        Optimized path reconstruction - only for top N destinations to avoid expensive computation.
+        Reconstructs paths from the predecessor array returned by the GPU.
+        Uses the mapping packed into the low 32 bits of the result.
         """
         fastest_paths = {}
         
-        # Create reverse mapping once (more efficient than searching every time)
-        idx_to_original = {mapped_idx: orig_id for orig_id, mapped_idx in self.id_map.items()}
-        
-        # Only reconstruct paths for top 20 destinations to save time
+        # Create reverse mapping: GPU Index -> Original Node Object
+        idx_to_original_node = {}
+        sorted_node_ids = list(self.original_graph.nodes.keys()) # Must match init order
+        for i, original_id in enumerate(sorted_node_ids):
+            idx_to_original_node[i] = self.original_graph.nodes[original_id]
+
+        # Only reconstruct for reachable nodes
         sorted_dests = sorted(
-            [(dest, time) for dest, time in result_times.items() if time != float('inf')],
+            [(dest, time) for dest, time in result_times.items()],
             key=lambda x: x[1]
-        )[:20]
+        )[:50] # Limit to top 50 for performance safety in logs
         
-        for dest_vertex_str, journey_time in sorted_dests:
-            dest_vertex_int = int(dest_vertex_str)
-            
-            # Skip if destination is source
-            if dest_vertex_int == source_vertex_int:
+        for dest_str, _ in sorted_dests:
+            dest_v = int(dest_str)
+            if dest_v == source_vertex_int:
                 continue
                 
-            # Quick path reconstruction with bounds checking
             path = []
-            current_vertex = dest_vertex_int
-            max_hops = 10  # Limit path length to avoid infinite loops
+            curr_v = dest_v
             
-            while (max_hops > 0 and current_vertex < len(predecessors) and 
-                   predecessors[current_vertex] != -1):
-                pred_node_idx = predecessors[current_vertex]
+            # Max hops safety
+            for _ in range(100):
+                if curr_v >= len(predecessors): break
                 
-                if pred_node_idx in idx_to_original:
-                    original_node_id = idx_to_original[pred_node_idx]
-                    path.append(self.original_graph.nodes[original_node_id])
-                    current_vertex = int(self.original_graph.nodes[original_node_id].u)
-                    max_hops -= 1
+                pred_node_idx = predecessors[curr_v]
+                
+                # Check for invalid predecessor (0xFFFFFFFF from init)
+                if pred_node_idx == 4294967295: 
+                    break
+                    
+                if pred_node_idx in idx_to_original_node:
+                    node_obj = idx_to_original_node[pred_node_idx]
+                    path.append(node_obj)
+                    curr_v = int(node_obj.u) # Move to the start of this edge
                 else:
                     break
             
             if path:
-                fastest_paths[dest_vertex_str] = path[::-1]  # Reverse to get source -> dest
-        
+                fastest_paths[dest_str] = path[::-1] # Reverse to get Source -> Dest
+                
         return fastest_paths
 
     def find_fastest_paths(self, source_vertex_s: str, reconstruct_paths: bool = False):
         """
-        Executes Algorithm 1: Multiple Breadth-First Search from the paper.
-        
+        Executes Algorithm 1: Multiple Breadth-First Search.
         Args:
-            source_vertex_s: Source vertex as string
-            reconstruct_paths: If True, reconstruct full paths (expensive). If False, only compute times (fast).
+            source_vertex_s: Source vertex ID as string.
+            reconstruct_paths: If True, unpacks predecessors and builds path objects.
         """
         source_vertex_int = int(source_vertex_s)
         t_start = time.perf_counter()
-        
+
         # --- 1. Initialization ---
-        # Initialize status array to 0 (false) for each node (Line 1 in Algorithm 1)
-        d_status = cp.full(self.num_nodes, 0, dtype=cp.int32)
+        # Status array: 0 = False, 1 = True
+        d_status = cp.zeros(self.num_nodes, dtype=cp.int32)
         
-        # Initialize journey times to infinity
-        d_journey_times = cp.full(self.max_vertex_id + 1, 2147483647, dtype=cp.int32)
-        d_journey_times[source_vertex_int] = 0
+        # Packed Results: High 32 bits = Journey Time, Low 32 bits = Predecessor Index
+        # Initialize with Max Int (infinity) in high bits
+        INF_TIME = 2147483647
+        init_val = (INF_TIME << 32) | 0xFFFFFFFF # Max time, invalid pred
+        d_packed_results = cp.full(self.max_vertex_id + 1, init_val, dtype=cp.uint64)
         
-        # Initialize predecessors for path reconstruction
-        d_predecessors = cp.full(self.max_vertex_id + 1, -1, dtype=cp.int32)
-        
-        # --- 2. Find Source Nodes and Sort by Departure Time (Line 2) ---
-        # Find all ESDG nodes corresponding to the source vertex
+        # Set source journey to 0
+        source_init = (0 << 32) | 0xFFFFFFFF
+        d_packed_results[source_vertex_int] = source_init
+
+        # --- 2. Identify and Sort Source Nodes ---
         source_node_indices = np.where(self.h_nodes_u == source_vertex_int)[0]
-        
         if len(source_node_indices) == 0:
             logging.warning(f"No source nodes found for vertex {source_vertex_int}")
             return {}, {}
-            
-        # Sort source nodes by departure time in DECREASING order (critical for correctness)
+
+        # "In non-increasing order of dep(z)"
         source_departures = self.h_nodes_t[source_node_indices]
-        sorted_order = np.argsort(-source_departures)  # Negative for descending order
-        sorted_source_indices = source_node_indices[sorted_order]
+        sorted_order = np.argsort(-source_departures)
+        sorted_indices = source_node_indices[sorted_order]
         sorted_departures = source_departures[sorted_order]
         
-        logging.info(f"Found {len(sorted_source_indices)} source nodes, processing in decreasing departure order")
-        if len(sorted_source_indices) > 0:
-            logging.info(f"Source departure times: {sorted_departures[:5]}...")  # Show first 5
-        else:
-            logging.error(f"No source nodes found for vertex {source_vertex_int}. Available vertices: {np.unique(self.h_nodes_u)[:10]}...")
+        logging.info(f"Processing {len(sorted_indices)} phases for source {source_vertex_int}")
+
+        # --- 3. Parallel Traversal ---
+        # Pre-allocate two buffers for frontiers (ping-pong)
+        # Max size is num_nodes
+        d_frontier_buffers = [
+            cp.zeros(self.num_nodes, dtype=cp.int32),
+            cp.zeros(self.num_nodes, dtype=cp.int32)
+        ]
         
-        # --- 3. Multiple BFS Phases (Algorithm 1 Main Loop) ---
-        threads_per_block = 256
-        
-        for phase, source_idx in enumerate(sorted_source_indices):
-            source_departure = sorted_departures[phase]
-            
-            # Skip if this source node was already visited in a previous phase
-            if cp.asnumpy(d_status[source_idx]) != 0:
+        # Counter for next frontier size (device array of size 1)
+        d_next_count = cp.zeros(1, dtype=cp.int32)
+
+        for phase, source_idx in enumerate(sorted_indices):
+            # Check status (Requires D->H sync, unavoidable in Algorithm 1 logic)
+            if d_status[source_idx].item() != 0:
                 continue
-                
-            # Initialize frontier with current source node
-            current_frontier = cp.array([source_idx], dtype=np.int32)
-            d_status[source_idx] = 1  # Mark as visited
+
+            # Init Phase
+            source_departure = int(sorted_departures[phase])
+            d_status[source_idx] = 1 # Mark visited
             
-            # BFS from this source node
-            while len(current_frontier) > 0:
-                frontier_size = len(current_frontier)
-                blocks_per_grid = (frontier_size + threads_per_block - 1) // threads_per_block
+            # Setup initial frontier
+            curr_buf_idx = 0
+            d_frontier_buffers[curr_buf_idx][0] = source_idx
+            current_frontier_size = 1
+            
+            # BFS Loop
+            while current_frontier_size > 0:
+                next_buf_idx = 1 - curr_buf_idx
                 
-                # Prepare next frontier markers
-                d_next_frontier_markers = cp.full(self.num_nodes, 0, dtype=cp.int32)
+                # Reset counter for next frontier 
+                d_next_count.fill(0)
                 
-                # Launch BFS kernel for current frontier
-                BFS_KERNEL(
-                    (blocks_per_grid,), (threads_per_block,),
+                # Calculate grid size
+                threads = 256
+                blocks = (current_frontier_size + threads - 1) // threads
+                
+                BFS_KERNEL_OPTIMIZED(
+                    (blocks,), (threads,),
                     (
-                        frontier_size,
-                        current_frontier,
+                        current_frontier_size,
+                        d_frontier_buffers[curr_buf_idx], # Current Nodes
                         self.d_nodes_v,
                         self.d_nodes_a,
                         source_departure,
                         self.d_adj_indptr,
                         self.d_adj_indices,
-                        d_journey_times,
+                        d_packed_results,
                         d_status,
-                        d_next_frontier_markers,
-                        d_predecessors
+                        d_frontier_buffers[next_buf_idx], # Next Frontier (Sparse)
+                        d_next_count # Atomic Counter
                     )
                 )
                 
-                # Build next frontier from markers
-                next_frontier_indices = cp.where(d_next_frontier_markers)[0]
-                current_frontier = next_frontier_indices
+                # Get size of next frontier (Device -> Host sync)
+                current_frontier_size = int(d_next_count.item())
+                curr_buf_idx = next_buf_idx
 
-        # --- 4. Retrieve Results (Device -> Host) ---
-        h_journey_times = cp.asnumpy(d_journey_times)
-        h_predecessors = cp.asnumpy(d_predecessors)
+        # --- 4. Unpack Results ---
+        h_packed = cp.asnumpy(d_packed_results)
         
-        # Format results to match Serial API
+        # Use bitwise ops to extract time and predecessor
+        times = h_packed >> 32
+        
         result_times = {}
-        for v in range(len(h_journey_times)):
-            t = h_journey_times[v]
-            if t < 2147483647:
-                result_times[str(v)] = int(t)
-            else:
-                result_times[str(v)] = float('inf')
+        for v in range(len(times)):
+            t = int(times[v])
+            if t < INF_TIME:
+                result_times[str(v)] = t
 
-        # --- 5. Optionally Reconstruct Paths on CPU ---
+        fastest_paths = {}
         if reconstruct_paths:
-            h_predecessors = cp.asnumpy(d_predecessors)
-            fastest_paths = self._reconstruct_paths_cpu_optimized(h_predecessors, source_vertex_int, result_times)
-        else:
-            fastest_paths = {}  # Skip expensive path reconstruction for pure performance
+            preds = h_packed & 0xFFFFFFFF
+            fastest_paths = self._reconstruct_paths_cpu(preds, result_times, source_vertex_int)
 
         t_end = time.perf_counter()
-        logging.info(f"GPU FPD finished in {t_end - t_start:.4f}s")
+        logging.info(f"GPU FPD Complete: {t_end - t_start:.4f}s")
         
         return result_times, fastest_paths

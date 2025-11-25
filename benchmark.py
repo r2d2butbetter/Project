@@ -18,7 +18,7 @@ def run_benchmark():
     # --- CONFIGURATION ---
     DATASET_FILE = "Datasets/network_temporal_day.csv"
     SOURCE_VERTEX = "2421"
-    NUM_ROWS = 30000  # Adjust this: Higher numbers = more visible GPU improvement
+    NUM_ROWS = 100000  # Adjust this: Higher numbers = more visible GPU improvement
     
     print(f"\n{'='*60}")
     print(f"  RUNNING SERIAL vs PARALLEL BENCHMARK (Rows: {NUM_ROWS})")

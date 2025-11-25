@@ -1,138 +1,166 @@
 import pandas as pd
 import logging
+import time
 from ESD_Graph.esd_transformer import transform_temporal_to_esd
+
+# Import all three solvers
 from FPD_Algorithm.serial_esdg_fpd import SerialESDG_FPD
-from FPD_Algorithm.parallel_esdg_fpd import ParallelESDG_FPD
+from FPD_Algorithm.parallel_esdg_fpd import ParallelESDG_FPD  # Algorithm 1 (MBFS)
+from FPD_Algorithm.parallel_esdg_lo import ParallelESDG_LO    # Algorithm 3 (Level Order)
 
 from utils.graph_caching import save_esd_graph_to_json, load_esd_graph_from_json
-from analysis.visualizer import visualize_top_paths
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def run_pipeline(dataset_path: str, source_node: str, num_rows: int = None):
     """
-    Executes the full pipeline: Load -> Transform -> Compute FPD -> Visualize.
+    Executes the full pipeline: Load -> Transform -> Compute FPD -> Compare.
     """
-    # ... (Data loading and ESDG transformation sections are correct) ...
-    print("="*50); print("STEP 1: LOADING AND PREPARING TEMPORAL DATA"); print("="*50)
+    # --- STEP 1: LOAD DATA ---
+    print("="*60); print("STEP 1: LOADING DATA"); print("="*60)
     df = pd.read_csv(dataset_path, sep=',', nrows=num_rows)
     temporal_edges_list = [(str(row['from_stop_I']), str(row['to_stop_I']),
                             int(row['dep_time_ut']), int(row['arr_time_ut'] - row['dep_time_ut']))
                            for _, row in df.iterrows() if row['arr_time_ut'] - row['dep_time_ut'] > 0]
-    print(f"Loaded and prepared {len(temporal_edges_list)} valid temporal edges.")
+    print(f"Loaded {len(temporal_edges_list)} temporal edges.")
 
-
-    print("\n" + "="*50); print("STEP 2: GETTING ESD GRAPH (CACHE OR BUILD)"); print("="*50)
+    # --- STEP 2: BUILD ESD GRAPH ---
+    print("\n" + "="*60); print("STEP 2: ESD GRAPH GENERATION"); print("="*60)
     esd_graph = load_esd_graph_from_json(num_rows)
     if esd_graph is None:
         esd_graph = transform_temporal_to_esd(temporal_edges_list)
         save_esd_graph_to_json(esd_graph, num_rows)
-    print("\n--- ESD Graph Structure Loaded ---")
-
-
-    print("\n" + "="*50); print("STEP 3: COMPUTING FASTEST PATH DURATION (FPD)"); print("="*50)
-
-    import time
     
-    # Debug: Check what vertices exist in the graph
+    # Vertex Validation
     all_vertices = set()
     for node in esd_graph.nodes.values():
-        all_vertices.add(int(node.u))
-        all_vertices.add(int(node.v))
+        all_vertices.add(int(node.u)); all_vertices.add(int(node.v))
     
     source_int = int(source_node)
-    print(f"\n🔍 DEBUGGING VERTEX MISMATCH:")
-    print(f"   Requested source: {source_node} (as int: {source_int})")
-    print(f"   Source exists in graph: {source_int in all_vertices}")
-    print(f"   Total vertices in graph: {len(all_vertices)}")
-    print(f"   Sample vertices: {sorted(list(all_vertices))[:10]}...")
-    
     if source_int not in all_vertices:
-        # Try to find a vertex that exists
-        alt_source = sorted(list(all_vertices))[0]
-        print(f"   🔄 Using alternative source: {alt_source}")
-        source_node = str(alt_source)
-    
-    # Compare performance: Parallel (fast, no paths) vs Serial (with paths)
-    print(f"\n=== PARALLEL GPU INITIALIZATION ===")
-    t_init_start = time.perf_counter()
-    fpd_solver_parallel = ParallelESDG_FPD(esd_graph)
-    t_init = time.perf_counter() - t_init_start
-    print(f"GPU Initialization Time: {t_init:.4f}s")
-    
-    print("=== PARALLEL GPU (Optimized - Times Only) ===")
-    t_start = time.perf_counter()
-    journey_times_parallel, _ = fpd_solver_parallel.find_fastest_paths(source_node, reconstruct_paths=False)
-    t_parallel_compute = time.perf_counter() - t_start
-    t_parallel_total = t_init + t_parallel_compute
-    print(f"GPU Computation Time: {t_parallel_compute:.4f}s")
-    print(f"GPU Total Time: {t_parallel_total:.4f}s")
-    
-    print("\n=== SERIAL CPU (With Path Reconstruction) ===")
-    t_start = time.perf_counter()
-    fpd_solver_serial = SerialESDG_FPD(esd_graph)
-    journey_times, fastest_paths = fpd_solver_serial.find_fastest_paths(source_node)
-    t_serial = time.perf_counter() - t_start
-    print(f"Serial CPU Time: {t_serial:.4f}s")
-    
-    print(f"\n📊 PERFORMANCE COMPARISON:")
-    print(f"   GPU Computation Only: {t_parallel_compute:.4f}s")
-    print(f"   GPU Total (init + compute): {t_parallel_total:.4f}s") 
-    print(f"   Serial CPU: {t_serial:.4f}s")
-    print(f"\n🚀 GPU Computation Speedup: {t_serial/t_parallel_compute:.2f}x faster!")
-    print(f"🔄 GPU Total vs Serial: {t_serial/t_parallel_total:.2f}x")
-    print(f"✅ Results match: {len(set(journey_times_parallel.items()) & set(journey_times.items()))} destinations")
-    
-    # Optional: Get paths for top 10 destinations using GPU (if needed for visualization)
-    print("\n=== PARALLEL GPU (With Limited Path Reconstruction) ===")
-    t_start = time.perf_counter()
-    journey_times_with_paths, fastest_paths_gpu = fpd_solver_parallel.find_fastest_paths(source_node, reconstruct_paths=True)
-    t_parallel_with_paths = time.perf_counter() - t_start
-    print(f"Parallel GPU Time (with paths): {t_parallel_with_paths:.4f}s")
-    
-    # Use GPU results with paths for display
-    journey_times = journey_times_with_paths
-    fastest_paths = fastest_paths_gpu
-
-    # --- 4. Display Results in Console (Corrected Section) ---
-    print("\n" + "="*50); print(f"STEP 4: RESULTS - FASTEST JOURNEY TIMES FROM '{source_node}'"); print("="*50)
-    sorted_results = sorted(journey_times.items(), key=lambda item: item[1])
-    
-    print(f"{'Destination':<15} | {'Journey Duration (s)':<25} | {'Path (Sequence of Edges in G)'}")
-    print("-" * 80)
-
-    # We will print the top 15 results for brevity in the console
-    for dest, time in sorted_results[:15]:
-        
-        # ***** FIX STARTS HERE *****
-        if time == float('inf'):
-            path_str = "Unreachable"
-        elif dest == source_node:
-            path_str = "Source Node"
+        if len(all_vertices) > 0:
+            alt_source = sorted(list(all_vertices))[0]
+            print(f"⚠️ Source {source_node} not found. Switching to {alt_source}.")
+            source_node = str(alt_source)
         else:
-            # Look up the reconstructed path from the `fastest_paths` dictionary
-            path_nodes = fastest_paths.get(dest)
-            if path_nodes:
-                # Format the path for readability by joining the original edge IDs
-                path_str = " -> ".join([f"e{node.original_edge_id}" for node in path_nodes])
-            else:
-                # This case handles if a path wasn't found, though it shouldn't happen for reachable nodes
-                path_str = "Path not available"
-        # ***** FIX ENDS HERE *****
-                
-        print(f"{dest:<15} | {time:<25} | {path_str}")
+            print("❌ Graph is empty."); return
 
-    # --- 5. Visualize Top 10 Paths ---
-    visualize_top_paths(esd_graph, source_node, journey_times, fastest_paths)
+    print("\n" + "="*60); print(f"STEP 3: RUNNING & COMPARING ALGORITHMS (Source: {source_node})"); print("="*60)
 
+    results = {} # To store times and outputs
+
+    # ---------------------------------------------------------
+    # 1. SERIAL CPU
+    # ---------------------------------------------------------
+    print("\n--- 1. Serial CPU ---")
+    t_start = time.perf_counter()
+    solver_serial = SerialESDG_FPD(esd_graph)
+    res_serial, paths_serial = solver_serial.find_fastest_paths(source_node)
+    t_serial = time.perf_counter() - t_start
+    print(f"⏱️ Time: {t_serial:.4f}s")
+    results['Serial'] = {'time': t_serial, 'data': res_serial}
+
+    # ---------------------------------------------------------
+    # 2. PARALLEL GPU: Algorithm 1 (MBFS)
+    # ---------------------------------------------------------
+    print("\n--- 2. Parallel GPU (Algo 1: MBFS) ---")
+    t_init_start = time.perf_counter()
+    solver_mbfs = ParallelESDG_FPD(esd_graph)
+    t_init_mbfs = time.perf_counter() - t_init_start
+    
+    t_compute_start = time.perf_counter()
+    res_mbfs, _ = solver_mbfs.find_fastest_paths(source_node, reconstruct_paths=False)
+    t_compute_mbfs = time.perf_counter() - t_compute_start
+    
+    print(f"⏱️ Init: {t_init_mbfs:.4f}s | Compute: {t_compute_mbfs:.4f}s | Total: {t_init_mbfs + t_compute_mbfs:.4f}s")
+    results['MBFS'] = {'time': t_compute_mbfs, 'total': t_init_mbfs + t_compute_mbfs, 'data': res_mbfs}
+
+    # ---------------------------------------------------------
+    # 3. PARALLEL GPU: Algorithm 3 (Level Order)
+    # ---------------------------------------------------------
+    print("\n--- 3. Parallel GPU (Algo 3: Level Order) ---")
+    t_init_start = time.perf_counter()
+    solver_lo = ParallelESDG_LO(esd_graph)
+    t_init_lo = time.perf_counter() - t_init_start
+    
+    t_compute_start = time.perf_counter()
+    res_lo, _ = solver_lo.find_fastest_paths(source_node, reconstruct_paths=False)
+    t_compute_lo = time.perf_counter() - t_compute_start
+    
+    print(f"⏱️ Init: {t_init_lo:.4f}s | Compute: {t_compute_lo:.4f}s | Total: {t_init_lo + t_compute_lo:.4f}s")
+    results['LO'] = {'time': t_compute_lo, 'total': t_init_lo + t_compute_lo, 'data': res_lo}
+
+    # ---------------------------------------------------------
+    # 4. COMPARISON & VALIDATION
+    # ---------------------------------------------------------
+    print("\n" + "="*60); print("PERFORMANCE SUMMARY"); print("="*60)
+    
+    # Calculate Speedups relative to Serial
+    speedup_mbfs = t_serial / results['MBFS']['time']
+    speedup_lo = t_serial / results['LO']['time']
+    
+    print(f"{'Algorithm':<20} | {'Compute Time':<15} | {'Speedup vs Serial':<20} | {'Match?':<10}")
+    print("-" * 75)
+    
+    # --- Robust Validation Logic ---
+    # 1. Filter out 'inf' from Serial results. GPU results only contain reachable nodes.
+    #    Comparing {A:10, B:inf} with {A:10} should pass.
+    serial_clean = {k: v for k, v in results['Serial']['data'].items() if v != float('inf')}
+    
+    # 2. Check MBFS
+    mbfs_data = results['MBFS']['data']
+    # Check if lengths match and if intersection of items matches the clean serial set
+    match_mbfs = (len(mbfs_data) == len(serial_clean)) and \
+                 (len(set(mbfs_data.items()) & set(serial_clean.items())) == len(serial_clean))
+    
+    print(f"{'Serial CPU':<20} | {t_serial:<15.4f} | {'1.00x':<20} | {'N/A':<10}")
+    print(f"{'Parallel MBFS':<20} | {results['MBFS']['time']:<15.4f} | {speedup_mbfs:<20.2f} | {'✅' if match_mbfs else '❌'}")
+    
+    # 3. Check LO
+    lo_data = results['LO']['data']
+    match_lo = (len(lo_data) == len(serial_clean)) and \
+               (len(set(lo_data.items()) & set(serial_clean.items())) == len(serial_clean))
+    
+    print(f"{'Parallel LO':<20} | {results['LO']['time']:<15.4f} | {speedup_lo:<20.2f} | {'✅' if match_lo else '❌'}")
+
+    # Debug info if LO mismatch
+    if not match_lo:
+        print("\n🔍 LO Mismatch Debug:")
+        print(f"   Serial (Clean) Count: {len(serial_clean)}")
+        print(f"   LO Count: {len(lo_data)}")
+        
+        # Check for missing keys
+        missing = set(serial_clean.keys()) - set(lo_data.keys())
+        extra = set(lo_data.keys()) - set(serial_clean.keys())
+        if missing: print(f"   Missing Keys in LO: {list(missing)[:5]}...")
+        if extra: print(f"   Extra Keys in LO: {list(extra)[:5]}...")
+        
+        # Check value mismatches
+        common = set(serial_clean.keys()) & set(lo_data.keys())
+        mismatches = [(k, serial_clean[k], lo_data[k]) for k in common if serial_clean[k] != lo_data[k]]
+        if mismatches:
+            print(f"   Value Mismatches (first 5): {mismatches[:5]}")
+
+    print("\n💡 NOTE:")
+    print("   - MBFS (Algo 1): Overhead per phase. Slow on small data.")
+    print("   - LO (Algo 3): Single pass. Fast on small data.")
+
+    # ---------------------------------------------------------
+    # 5. SAMPLE PATH OUTPUT
+    # ---------------------------------------------------------
+    print("\n" + "="*60); print(f"SAMPLE OUTPUT (Serial Reconstructed Paths)"); print("="*60)
+    sorted_paths = sorted(results['Serial']['data'].items(), key=lambda x: x[1])[:10]
+    
+    print(f"{'Dest':<10} | {'Duration':<10} | {'Path'}")
+    for dest, duration in sorted_paths:
+        path_nodes = paths_serial.get(dest)
+        path_str = " -> ".join([f"e{n.original_edge_id}" for n in path_nodes]) if path_nodes else "N/A"
+        if dest == source_node: path_str = "Source"
+        print(f"{dest:<10} | {duration:<10} | {path_str}")
 
 if __name__ == "__main__":
     DATASET_FILE = "Datasets/network_temporal_day.csv"
-    SOURCE_VERTEX = "2421"
-    NUM_ROWS_TO_PROCESS = 100000
+    SOURCE_VERTEX = "3391" 
+    NUM_ROWS = 100000 
     
-    print(f"🔧 Configuration: Processing {NUM_ROWS_TO_PROCESS} temporal edges")
-    print("💡 Note: GPU excels with larger datasets (try 50000+ rows)")
-    print("⚡ For small datasets, initialization overhead dominates\n")
-    
-    run_pipeline(DATASET_FILE, SOURCE_VERTEX, num_rows=NUM_ROWS_TO_PROCESS)
+    run_pipeline(DATASET_FILE, SOURCE_VERTEX, NUM_ROWS)
