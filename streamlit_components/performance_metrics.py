@@ -233,7 +233,8 @@ def display_performance_metrics(results, num_nodes):
     """
     Display comprehensive performance metrics in a grid layout
     """
-    st.subheader('📊 Performance Metrics Dashboard')
+    st.subheader('Performance Metrics Dashboard')
+    st.caption('Times shown are for computing paths from ONE source to ALL reachable destinations')
     
     # Create metrics grid
     num_algorithms = len(results)
@@ -244,7 +245,7 @@ def display_performance_metrics(results, num_nodes):
             st.markdown(f"### {alg}")
             
             # Compute time
-            st.metric('Compute Time', f"{data['time']:.4f}s")
+            st.metric('Compute Time', f"{data['time']:.4f}s", help='Time to find paths from source to all reachable vertices')
             
             # Throughput
             throughput = num_nodes / data['time']
@@ -382,7 +383,7 @@ def create_parallel_efficiency_chart(results):
     serial_time = results['Serial']['time']
     
     for alg, data in results.items():
-        if alg != 'Serial' and ('MBFS' in alg or 'LO' in alg):
+        if alg != 'Serial':
             algorithms.append(alg)
             speedup = serial_time / data['time']
             efficiency = (speedup / ideal_cores) * 100  # Percentage
