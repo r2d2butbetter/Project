@@ -12,6 +12,7 @@ from FPD_Algorithm.serial_esdg_fpd import SerialESDG_FPD
 from FPD_Algorithm.parallel_esdg_fpd import ParallelESDG_FPD
 from FPD_Algorithm.parallel_esdg_lo import ParallelESDG_LO
 from FPD_Algorithm.parallel_esdg_lo_multi import ParallelWeightedLO
+from FPD_Algorithm.parallel_esdg_lw import ParallelESDG_LW
 from utils.graph_caching import save_esd_graph_to_json, load_esd_graph_from_json
 from streamlit_components.graph_visualizer import (
     create_graph_topology_view, create_temporal_heatmap, 
@@ -37,57 +38,10 @@ logging.basicConfig(level=logging.INFO)
 # Page configuration
 st.set_page_config(
     page_title="ESD Graph Pathfinding Analyzer",
-    page_icon="🚀",
+    page_icon="�",
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: bold;
-        color: #1E88E5;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .sub-header {
-        font-size: 1.5rem;
-        color: #424242;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .info-box {
-        background-color: #E3F2FD;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #1E88E5;
-        margin: 1rem 0;
-    }
-    .success-box {
-        background-color: #E8F5E9;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #4CAF50;
-        margin: 1rem 0;
-    }
-    .warning-box {
-        background-color: #FFF3E0;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #FF9800;
-        margin: 1rem 0;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 def load_data(dataset_path, num_rows=None):
     """Load and process temporal graph data"""
@@ -120,12 +74,12 @@ def build_esd_graph(temporal_edges, num_rows):
             save_esd_graph_to_json(esd_graph, num_rows)
             progress_bar.progress(100)
             
-            status_text.text('✅ ESD Graph ready!')
+            status_text.text('ESD Graph ready!')
             time.sleep(0.5)
             status_text.empty()
             progress_bar.empty()
         else:
-            st.success('✅ Loaded cached ESD graph')
+            st.success('Loaded cached ESD graph')
     
     return esd_graph
 
@@ -140,11 +94,11 @@ def validate_source(esd_graph, source_vertex):
     if source_int not in all_vertices:
         if len(all_vertices) > 0:
             alt_source = sorted(list(all_vertices))[0]
-            st.warning(f'⚠️ Source {source_vertex} not found. Using {alt_source} instead.')
+            st.warning(f'Source {source_vertex} not found. Using {alt_source} instead.')
             return str(alt_source)
     return source_vertex
 
-def run_algorithms(esd_graph, source_vertex, run_serial, run_mbfs, run_lo):
+def run_algorithms(esd_graph, source_vertex, run_serial, run_mbfs, run_lo, run_lw):
     """Execute selected algorithms and collect results"""
     results = {}
     
@@ -161,7 +115,7 @@ def run_algorithms(esd_graph, source_vertex, run_serial, run_mbfs, run_lo):
                 'paths': paths_serial,
                 'color': '#FF6B6B'
             }
-            st.success(f'✅ Serial: {t_serial:.4f}s')
+            st.success(f'Serial: {t_serial:.4f}s')
     
     # Parallel MBFS
     if run_mbfs:
@@ -181,7 +135,7 @@ def run_algorithms(esd_graph, source_vertex, run_serial, run_mbfs, run_lo):
                 'data': res_mbfs,
                 'color': '#4ECDC4'
             }
-            st.success(f'✅ MBFS: {t_compute:.4f}s (Init: {t_init:.4f}s)')
+            st.success(f'MBFS: {t_compute:.4f}s (Init: {t_init:.4f}s)')
     
     # Parallel Level Order
     if run_lo:
@@ -201,7 +155,27 @@ def run_algorithms(esd_graph, source_vertex, run_serial, run_mbfs, run_lo):
                 'data': res_lo,
                 'color': '#95E1D3'
             }
-            st.success(f'✅ Level Order: {t_compute:.4f}s (Init: {t_init:.4f}s)')
+            st.success(f'Level Order: {t_compute:.4f}s (Init: {t_init:.4f}s)')
+    
+    # Parallel Local Worklist
+    if run_lw:
+        with st.spinner('Running Parallel GPU (Local Worklist)...'):
+            t_init_start = time.perf_counter()
+            solver_lw = ParallelESDG_LW(esd_graph)
+            t_init = time.perf_counter() - t_init_start
+            
+            t_compute_start = time.perf_counter()
+            res_lw, _ = solver_lw.find_fastest_paths(source_vertex, reconstruct_paths=False)
+            t_compute = time.perf_counter() - t_compute_start
+            
+            results['LW'] = {
+                'time': t_compute,
+                'init_time': t_init,
+                'total_time': t_init + t_compute,
+                'data': res_lw,
+                'color': '#A8E6CF'
+            }
+            st.success(f'Local Worklist: {t_compute:.4f}s (Init: {t_init:.4f}s)')
     
     return results
 
@@ -359,7 +333,7 @@ def create_reachability_comparison(results):
 
 def display_sample_paths(results, source_vertex, num_samples=10):
     """Display sample shortest paths"""
-    st.subheader('📍 Detailed Path Information')
+    st.subheader('Detailed Path Information')
     
     if 'Serial' in results and results['Serial']['paths']:
         paths = results['Serial']['paths']
@@ -397,7 +371,7 @@ def display_sample_paths(results, source_vertex, num_samples=10):
         
         if path_data:
             df = pd.DataFrame(path_data)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width='stretch', hide_index=True)
             
             # Summary stats
             col1, col2, col3, col4 = st.columns(4)
@@ -420,7 +394,7 @@ def display_sample_paths(results, source_vertex, num_samples=10):
 
 def validate_results(results):
     """Validate correctness across algorithms"""
-    st.subheader('✅ Correctness Validation')
+    st.subheader('Correctness Validation')
     
     if 'Serial' not in results:
         st.warning('Serial algorithm must be enabled for validation')
@@ -449,7 +423,7 @@ def validate_results(results):
         
         validation_results.append({
             'Algorithm': alg,
-            'Status': '✅ Passed' if match else '❌ Failed',
+            'Status': 'Passed' if match else 'Failed',
             'Reachable Nodes': len(alg_data),
             'Expected': len(serial_clean),
             'Missing': len(missing),
@@ -458,19 +432,17 @@ def validate_results(results):
         })
     
     df = pd.DataFrame(validation_results)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width='stretch', hide_index=True)
 
 def main():
     # Header
-    st.markdown('<div class="main-header">🚀 ESD Graph Pathfinding Analyzer</div>', 
-                unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">GPU-Accelerated Temporal Graph Analysis</div>', 
-                unsafe_allow_html=True)
+    st.title('ESD Graph Pathfinding Analyzer')
+    st.subheader('GPU-Accelerated Temporal Graph Analysis')
     
     # Analysis Mode Selection
     st.markdown("---")
     analysis_mode = st.radio(
-        "📊 Select Analysis Mode:",
+        "Select Analysis Mode:",
         ["Benchmark Analysis", "Custom Path Query"],
         horizontal=True,
         help="Choose between running benchmark comparisons or querying specific paths"
@@ -484,7 +456,7 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.header('⚙️ Configuration')
+        st.header('Configuration')
         
         # Dataset selection
         dataset_path = st.text_input(
@@ -511,15 +483,16 @@ def main():
         st.divider()
         
         # Algorithm selection
-        st.subheader('🔬 Algorithms')
+        st.subheader('Algorithms')
         run_serial = st.checkbox('Serial CPU', value=True)
         run_mbfs = st.checkbox('Parallel MBFS (Algo 1)', value=True)
         run_lo = st.checkbox('Parallel Level Order (Algo 3)', value=True)
+        run_lw = st.checkbox('Parallel Local Worklist (Algo 2)', value=True)
         
         st.divider()
         
         # Visualization parameters (set before analysis)
-        st.subheader('📊 Visualization Settings')
+        st.subheader('Visualization Settings')
         st.caption('Configure these before running analysis to avoid reloads')
         
         top_n_paths = st.slider(
@@ -528,7 +501,7 @@ def main():
             max_value=30,
             value=20,
             step=5,
-            help='🗺️ Controls the interactive path network map - shows shortest paths to this many closest destinations with travel times and edge durations'
+            help='Controls the interactive path network map - shows shortest paths to this many closest destinations with travel times and edge durations'
         )
         
         connectivity_sample = st.slider(
@@ -537,7 +510,7 @@ def main():
             max_value=500,
             value=100,
             step=50,
-            help='📊 Number of nodes to sample for the connectivity matrix heatmap (higher = more detail but slower rendering)'
+            help='Number of nodes to sample for the connectivity matrix heatmap (higher = more detail but slower rendering)'
         )
         
         max_viz_nodes = st.slider(
@@ -546,39 +519,39 @@ def main():
             max_value=1000,
             value=300,
             step=50,
-            help='🌐 Maximum nodes to display in the interactive 3D graph topology visualization (higher = more complete view but slower performance)'
+            help='Maximum nodes to display in the interactive 3D graph topology visualization (higher = more complete view but slower performance)'
         )
         
-        with st.expander('ℹ️ What do these settings control?'):
+        with st.expander('What do these settings control?'):
             st.markdown("""
-            **Path Map Destinations** 🗺️  
+            **Path Map Destinations**  
             The interactive network map shows shortest paths from your source vertex to the N closest destinations.
             - Shows: Vertex labels, journey times, edge durations
             - Features: Hover tooltips, zoom/pan, clickable legend
             - Use case: Understanding path structure and travel patterns
             
-            **Connectivity Matrix Sample** 📊  
+            **Connectivity Matrix Sample**  
             A heatmap showing which nodes connect to which other nodes.
             - Samples a subset of nodes for visualization
             - Higher values = more detailed but slower
             - Use case: Analyzing graph connectivity patterns
             
-            **Max 3D Topology Nodes** 🌐  
+            **Max 3D Topology Nodes**  
             An interactive 3D scatter plot of the graph structure.
             - Node size indicates importance (degree/connectivity)
             - Colors show clustering or properties
             - Use case: Understanding overall graph structure
             
-            💡 **Tip:** Start with default values, then adjust based on your graph size and performance needs.
+            **Tip:** Start with default values, then adjust based on your graph size and performance needs.
             """)
         
         st.divider()
         
         # Run button
-        run_analysis = st.button('🚀 Run Analysis', type='primary', use_container_width=True)
+        run_analysis = st.button('Run Analysis', type='primary', width='stretch')
         
         # Info
-        with st.expander('ℹ️ About'):
+        with st.expander('About'):
             st.markdown("""
             ### ESD Graph Pathfinding Analyzer
             
@@ -589,16 +562,17 @@ def main():
             
             - **Serial CPU**: Baseline implementation using traditional BFS traversal
             - **Parallel MBFS (Algorithm 1)**: Multi-BFS approach with GPU acceleration
+            - **Parallel Local Worklist (Algorithm 2)**: Dynamic worklist-based GPU traversal
             - **Parallel Level Order (Algorithm 3)**: Level-based parallel traversal
             
             **Key Features:**
             
-            ✅ GPU acceleration with CUDA/CuPy  
-            ✅ Real-time performance comparison  
-            ✅ Interactive 3D graph visualizations  
-            ✅ Path reconstruction and analysis  
-            ✅ Scalability projections  
-            ✅ Comprehensive metrics and statistics  
+            - GPU acceleration with CUDA/CuPy  
+            - Real-time performance comparison  
+            - Interactive 3D graph visualizations  
+            - Path reconstruction and analysis  
+            - Scalability projections  
+            - Comprehensive metrics and statistics  
             
             **How to Use:**
             
@@ -612,27 +586,27 @@ def main():
             Based on "Efficient Algorithms for Fastest Path Problem in Temporal Graphs"
             """)
         
+
         # System info
-        with st.expander('💻 System Information'):
-            try:
-                import cupy as cp
-                gpu_available = cp.cuda.runtime.getDeviceCount() > 0
-                if gpu_available:
-                    device = cp.cuda.Device()
-                    st.success(f'✅ GPU Available: {device.compute_capability}')
-                    st.info(f'Memory: {device.mem_info[1] / 1e9:.2f} GB total')
-                else:
-                    st.warning('⚠️ No GPU detected')
-            except:
-                st.error('❌ CuPy not available - GPU algorithms will fail')
-            
+        import cupy as cp
+        with st.expander('System Information'):
+            gpu_available = cp.cuda.runtime.getDeviceCount() > 0
+            if gpu_available:
+                device = cp.cuda.Device()
+                props = cp.cuda.runtime.getDeviceProperties(device.id)
+                st.info(f'GPU: {props["name"]}')
+                st.info(f'Memory: {props["totalGlobalMem"] / 1e9:.2f} GB total')
+            else:
+                st.warning('No GPU detected')
+
             st.info(f'NumPy version: {np.__version__}')
             st.info(f'Pandas version: {pd.__version__}')
-    
+
+
     # Main content
     if run_analysis:
-        if not any([run_serial, run_mbfs, run_lo]):
-            st.warning('⚠️ Please select at least one algorithm to run')
+        if not any([run_serial, run_mbfs, run_lo, run_lw]):
+            st.warning('Please select at least one algorithm to run')
             return
         
         # Configuration summary
@@ -643,7 +617,7 @@ def main():
         """)
         
         # Step 1: Load Data
-        st.header('📊 Data Loading')
+        st.header('Data Loading')
         temporal_edges, df = load_data(dataset_path, num_rows)
         
         if temporal_edges is None:
@@ -659,7 +633,7 @@ def main():
             st.metric('Unique Vertices', f'{unique_vertices:,}')
         
         # Step 2: Build ESD Graph
-        st.header('🔄 ESD Graph Construction')
+        st.header('ESD Graph Construction')
         esd_graph = build_esd_graph(temporal_edges, num_rows)
         
         col1, col2 = st.columns(2)
@@ -673,15 +647,15 @@ def main():
         source_vertex = validate_source(esd_graph, source_vertex)
         
         # Step 3: Run Algorithms
-        st.header('⚡ Algorithm Execution')
-        results = run_algorithms(esd_graph, source_vertex, run_serial, run_mbfs, run_lo)
+        st.header('Algorithm Execution')
+        results = run_algorithms(esd_graph, source_vertex, run_serial, run_mbfs, run_lo, run_lw)
         
         if not results:
             st.error('No results to display')
             return
         
         # Step 4: Performance Analysis
-        st.header('📈 Performance Analysis')
+        st.header('Performance Analysis')
         
         # Performance metrics dashboard
         display_performance_metrics(results, len(esd_graph.nodes))
@@ -689,29 +663,29 @@ def main():
         st.divider()
         
         # Charts in tabs
-        tab1, tab2, tab3, tab4 = st.tabs(['⏱️ Time Comparison', '🚀 Speedup', '📊 Distribution', '⚡ Efficiency'])
+        tab1, tab2, tab3, tab4 = st.tabs(['Time Comparison', 'Speedup', 'Distribution', 'Efficiency'])
         
         with tab1:
             col1, col2 = st.columns(2)
             with col1:
                 fig_perf = create_performance_chart(results)
-                st.plotly_chart(fig_perf, use_container_width=True)
+                st.plotly_chart(fig_perf, width='stretch')
             with col2:
                 fig_throughput = create_throughput_chart(results, len(esd_graph.nodes))
-                st.plotly_chart(fig_throughput, use_container_width=True)
+                st.plotly_chart(fig_throughput, width='stretch')
         
         with tab2:
             col1, col2 = st.columns(2)
             with col1:
                 fig_speedup = create_speedup_chart(results)
                 if fig_speedup:
-                    st.plotly_chart(fig_speedup, use_container_width=True)
+                    st.plotly_chart(fig_speedup, width='stretch')
                 else:
                     st.info('Run Serial algorithm to see speedup comparison')
             with col2:
                 fig_efficiency = create_parallel_efficiency_chart(results)
                 if fig_efficiency:
-                    st.plotly_chart(fig_efficiency, use_container_width=True)
+                    st.plotly_chart(fig_efficiency, width='stretch')
                 else:
                     st.info('Parallel efficiency requires Serial baseline')
         
@@ -719,61 +693,61 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 fig_dist = create_journey_distribution(results)
-                st.plotly_chart(fig_dist, use_container_width=True)
+                st.plotly_chart(fig_dist, width='stretch')
             with col2:
                 fig_box = create_journey_time_box_plot(results)
-                st.plotly_chart(fig_box, use_container_width=True)
+                st.plotly_chart(fig_box, width='stretch')
             
-            st.plotly_chart(create_cumulative_distribution(results), use_container_width=True)
+            st.plotly_chart(create_cumulative_distribution(results), width='stretch')
         
         with tab4:
             col1, col2 = st.columns(2)
             with col1:
                 fig_reach = create_reachability_comparison(results)
-                st.plotly_chart(fig_reach, use_container_width=True)
+                st.plotly_chart(fig_reach, width='stretch')
             with col2:
                 fig_radar = create_efficiency_radar(results)
                 if fig_radar:
-                    st.plotly_chart(fig_radar, use_container_width=True)
+                    st.plotly_chart(fig_radar, width='stretch')
                 else:
                     st.info('Need multiple algorithms for comparison')
         
         # Step 5: Graph Analysis
-        st.header('🔍 Graph Structure Analysis')
+        st.header('Graph Structure Analysis')
         
-        graph_tab1, graph_tab2, graph_tab3, graph_tab4 = st.tabs(['🌐 Topology', '📈 Temporal', '📊 Degree', '🎯 Levels'])
+        graph_tab1, graph_tab2, graph_tab3, graph_tab4 = st.tabs(['Topology', 'Temporal', 'Degree', 'Levels'])
         
         with graph_tab1:
             with st.spinner('Generating topology visualization...'):
                 fig_topology = create_graph_topology_view(esd_graph, max_nodes=max_viz_nodes)
-                st.plotly_chart(fig_topology, use_container_width=True)
+                st.plotly_chart(fig_topology, width='stretch')
             
             st.subheader('Connectivity Matrix')
             fig_matrix = create_connectivity_matrix(esd_graph, sample_size=connectivity_sample)
-            st.plotly_chart(fig_matrix, use_container_width=True)
+            st.plotly_chart(fig_matrix, width='stretch')
             st.caption(f'Showing connectivity matrix for {connectivity_sample} sampled nodes (configured in sidebar)')
         
         with graph_tab2:
             fig_temporal = create_temporal_heatmap(esd_graph)
-            st.plotly_chart(fig_temporal, use_container_width=True)
+            st.plotly_chart(fig_temporal, width='stretch')
         
         with graph_tab3:
             fig_degree = create_degree_distribution(esd_graph)
-            st.plotly_chart(fig_degree, use_container_width=True)
+            st.plotly_chart(fig_degree, width='stretch')
         
         with graph_tab4:
             fig_levels = create_level_distribution(esd_graph)
-            st.plotly_chart(fig_levels, use_container_width=True)
-            st.info('💡 Level distribution shows the graph structure used by the Level Order algorithm for parallel processing')
+            st.plotly_chart(fig_levels, width='stretch')
+            st.info('Level distribution shows the graph structure used by the Level Order algorithm for parallel processing')
         
         # Step 6: Interactive Path Network Visualization
-        st.header('🗺️ Interactive Path Network Map')
+        st.header('Interactive Path Network Map')
         
         st.markdown(f"""
         This interactive map shows the shortest paths from the source vertex to the top **{top_n_paths}** closest destinations.
         Explore the network structure, travel times, and edge durations.
         
-        💡 *Adjust the number of destinations in the sidebar before running analysis.*
+        *Adjust the number of destinations in the sidebar before running analysis.*
         """)
         
         if 'Serial' in results and results['Serial'].get('paths'):
@@ -783,16 +757,16 @@ def main():
                 st.markdown("""
                 **Map Legend:**
                 
-                ⭐ **Red Star**  
+                **Red Star**  
                 Source vertex
                 
-                💎 **Teal Diamonds**  
+                **Teal Diamonds**  
                 Top destinations
                 
-                ⚪ **Green Circles**  
+                **Green Circles**  
                 Intermediate nodes
                 
-                ― **Gray Lines**  
+                **Gray Lines**  
                 Travel edges
                 
                 ---
@@ -808,30 +782,30 @@ def main():
                 # Use a container to avoid full reload
                 fig_path_map = create_path_network_map(results, source_vertex, esd_graph, top_n=top_n_paths)
                 if fig_path_map:
-                    st.plotly_chart(fig_path_map, use_container_width=True, key=f'path_map_{top_n_paths}')
+                    st.plotly_chart(fig_path_map, width='stretch', key=f'path_map_{top_n_paths}')
                 else:
                     st.warning('Unable to generate path map. Ensure paths are available.')
             
             # Journey time comparison chart
-            st.subheader('📊 Journey Time Rankings')
+            st.subheader('Journey Time Rankings')
             fig_journey_comp = create_journey_time_comparison_chart(results, source_vertex, top_n=top_n_paths)
             if fig_journey_comp:
-                st.plotly_chart(fig_journey_comp, use_container_width=True, key=f'journey_chart_{top_n_paths}')
+                st.plotly_chart(fig_journey_comp, width='stretch', key=f'journey_chart_{top_n_paths}')
                 
             st.info("""
-            💡 **Tip:** Adjust the slider above to dynamically change the number of destinations displayed. 
+            **Tip:** Adjust the slider above to dynamically change the number of destinations displayed. 
             The visualization updates instantly without rerunning the entire analysis.
             """)
         else:
-            st.info('🔍 Enable Serial algorithm and run analysis to see path network visualization')
+            st.info('Enable Serial algorithm and run analysis to see path network visualization')
         
         st.divider()
         
         # Step 7: Scalability Analysis
-        st.header('📈 Scalability Projection')
+        st.header('Scalability Projection')
         fig_scalability = create_scalability_projection(results, len(esd_graph.nodes))
-        st.plotly_chart(fig_scalability, use_container_width=True)
-        st.info('💡 This projection estimates algorithm performance on different dataset sizes based on complexity analysis')
+        st.plotly_chart(fig_scalability, width='stretch')
+        st.info('This projection estimates algorithm performance on different dataset sizes based on complexity analysis')
         
         # Step 8: Validation
         validate_results(results)
@@ -840,15 +814,15 @@ def main():
         display_sample_paths(results, source_vertex, num_samples=top_n_paths)
         
         # Step 10: Detailed Metrics Table
-        st.header('📊 Detailed Metrics')
+        st.header('Detailed Metrics')
         
         df_comparison = create_comparison_table(results)
-        st.dataframe(df_comparison, use_container_width=True, hide_index=True)
+        st.dataframe(df_comparison, width='stretch', hide_index=True)
         
         # Download option
         csv = df_comparison.to_csv(index=False)
         st.download_button(
-            label="📥 Download Metrics as CSV",
+            label="Download Metrics as CSV",
             data=csv,
             file_name="algorithm_comparison.csv",
             mime="text/csv"
@@ -856,9 +830,8 @@ def main():
         
     else:
         # Landing page
-        st.markdown('<div class="info-box">', unsafe_allow_html=True)
-        st.markdown("""
-        ### 👋 Welcome to the ESD Graph Pathfinding Analyzer!
+        st.info("""
+        ### Welcome to the ESD Graph Pathfinding Analyzer!
         
         This application provides a comprehensive analysis of temporal graph pathfinding algorithms using GPU acceleration.
         
@@ -868,7 +841,7 @@ def main():
         3. **Set visualization parameters** - Path destinations, matrix samples, 3D nodes
         4. **Click "Run Analysis"** - All visualizations will use your configured settings
         
-        **💡 Pro Tip:** Set all visualization parameters in the sidebar BEFORE running analysis. 
+        **Pro Tip:** Set all visualization parameters in the sidebar BEFORE running analysis. 
         This prevents page reloads and provides a smooth experience exploring your results.
         
         The app will guide you through:
@@ -879,22 +852,21 @@ def main():
         - Performance visualization and metrics
         - Result validation
         """)
-        st.markdown('</div>', unsafe_allow_html=True)
         
         st.image('https://via.placeholder.com/800x400/667eea/ffffff?text=Configure+Settings+and+Click+Run+Analysis', 
-                use_column_width=True)
+                width='stretch')
 
 def run_custom_path_query():
     """Custom path query interface with traffic and cost analysis"""
-    st.header("🎯 Custom Path Query")
+    st.header("Custom Path Query")
     st.markdown("Find specific paths with detailed traffic, cost, and conflict analysis")
     
     # Sidebar configuration
     with st.sidebar:
-        st.header("⚙️ Query Configuration")
+        st.header("Query Configuration")
         
         # Dataset selection
-        st.subheader("📂 Dataset")
+        st.subheader("Dataset")
         data_path = st.text_input("Data Path", "Datasets/network_temporal_day.csv")
         
         dataset_size = st.slider(
@@ -907,7 +879,7 @@ def run_custom_path_query():
         )
         
         # Query mode
-        st.subheader("🔍 Query Mode")
+        st.subheader("Query Mode")
         query_mode = st.radio(
             "Select Query Type:",
             ["Single Path", "Multiple Pairs"],
@@ -915,7 +887,7 @@ def run_custom_path_query():
         )
         
         # Load data button
-        load_data_btn = st.button("📊 Load Dataset", type="primary")
+        load_data_btn = st.button("Load Dataset", type="primary")
     
     # Initialize session state
     if 'esd_graph_custom' not in st.session_state:
@@ -933,7 +905,7 @@ def run_custom_path_query():
                 if esd_graph is None:
                     # Load temporal data
                     df = pd.read_csv(data_path, nrows=dataset_size)
-                    st.info(f"📊 Loaded {len(df)} temporal edges from CSV")
+                    st.info(f"Loaded {len(df)} temporal edges from CSV")
                     
                     # Convert DataFrame to list of tuples (u, v, departure_time, duration)
                     temporal_edges = [
@@ -944,14 +916,14 @@ def run_custom_path_query():
                     ]
                     
                     # Transform to ESD graph
-                    st.info("🔄 Transforming to ESD graph (this may take a moment)...")
+                    st.info("Transforming to ESD graph (this may take a moment)...")
                     esd_graph = transform_temporal_to_esd(temporal_edges)
                     
                     # Cache for future use
                     save_esd_graph_to_json(esd_graph, dataset_size)
-                    st.success("💾 ESD graph cached for future use")
+                    st.success("ESD graph cached for future use")
                 else:
-                    st.success("⚡ Loaded ESD graph from cache")
+                    st.success("Loaded ESD graph from cache")
                 
                 # Store in session state
                 st.session_state.esd_graph_custom = esd_graph
@@ -965,10 +937,10 @@ def run_custom_path_query():
                 
                 num_vertices = len(esd_graph.nodes)
                 num_edges = sum(len(neighbors) for neighbors in esd_graph.adj.values())
-                st.success(f"✅ ESD Graph Ready: {num_vertices} vertices, {num_edges} edges")
+                st.success(f"ESD Graph Ready: {num_vertices} vertices, {num_edges} edges")
                 
             except Exception as e:
-                st.error(f"❌ Error loading data: {e}")
+                st.error(f"Error loading data: {e}")
                 import traceback
                 st.code(traceback.format_exc())
                 return
@@ -1002,7 +974,7 @@ def run_custom_path_query():
                     help="Target vertex for the path"
                 )
             
-            if st.button("🚀 Find Path", type="primary"):
+            if st.button("Find Path", type="primary"):
                 with st.spinner("Computing weighted path with conflict tracking..."):
                     try:
                         results, global_stats = solver.find_weighted_paths(
@@ -1026,7 +998,7 @@ def run_custom_path_query():
                                 st.metric("Conflicts", result['conflicts'])
                             
                             # Detailed path visualization
-                            st.subheader("📍 Path Details")
+                            st.subheader("Path Details")
                             fig_detail = create_path_detail_visualization(
                                 result['path'],
                                 esd_graph.edge_wait_times,
@@ -1036,7 +1008,7 @@ def run_custom_path_query():
                             st.plotly_chart(fig_detail, use_container_width=True)
                             
                             # Conflict visualization
-                            st.subheader("🚦 Traffic Analysis")
+                            st.subheader("Traffic Analysis")
                             col1, col2 = st.columns(2)
                             
                             with col1:
@@ -1053,18 +1025,18 @@ def run_custom_path_query():
                                     st.info("No conflicts detected")
                             
                             # Path reconstruction
-                            st.subheader("🛤️ Path Sequence")
+                            st.subheader("Path Sequence")
                             path_str = " → ".join(str(v) for v in result['path'])
                             st.code(path_str, language=None)
                         else:
-                            st.warning("❌ No path found")
+                            st.warning("No path found")
                             
                     except Exception as e:
-                        st.error(f"❌ Error computing path: {e}")
+                        st.error(f"Error computing path: {e}")
         
         else:
             # Multiple pairs query
-            st.subheader("📋 Multiple Source-Destination Pairs")
+            st.subheader("Multiple Source-Destination Pairs")
             
             input_method = st.radio(
                 "Input Method:",
@@ -1088,14 +1060,14 @@ def run_custom_path_query():
                             src, dst = map(int, line.strip().split(','))
                             pairs.append((src, dst))
                 except:
-                    st.error("❌ Invalid format. Use: source,destination")
+                    st.error("Invalid format. Use: source,destination")
             else:
                 uploaded_file = st.file_uploader("Upload CSV (columns: source,destination)", type=['csv'])
                 if uploaded_file:
                     pairs_df = pd.read_csv(uploaded_file)
                     pairs = list(zip(pairs_df['source'], pairs_df['destination']))
             
-            if pairs and st.button("🚀 Find All Paths", type="primary"):
+            if pairs and st.button("Find All Paths", type="primary"):
                 with st.spinner(f"Computing {len(pairs)} weighted paths..."):
                     try:
                         sources = np.array([p[0] for p in pairs], dtype=np.int32)
@@ -1119,7 +1091,7 @@ def run_custom_path_query():
                             st.metric("Total Conflicts", total_conflicts)
                         
                         # Visualizations
-                        st.subheader("📊 Analysis")
+                        st.subheader("Analysis")
                         
                         tab1, tab2, tab3, tab4 = st.tabs([
                             "Cost Heatmap", "Multi-Path Network", "Comparison Table", "Edge Usage"
@@ -1141,7 +1113,7 @@ def run_custom_path_query():
                             st.plotly_chart(fig_edges, use_container_width=True)
                         
                         # Global statistics
-                        st.subheader("🌐 Global Conflict Statistics")
+                        st.subheader("Global Conflict Statistics")
                         
                         if global_stats:
                             col1, col2 = st.columns([1, 1])
@@ -1158,7 +1130,7 @@ def run_custom_path_query():
                             st.info("No major conflicts detected - paths were optimal on first visit")
                         
                         # Download results
-                        st.subheader("💾 Export Results")
+                        st.subheader("Export Results")
                         results_df = pd.DataFrame([{
                             'source': r['source'],
                             'destination': r['dest'],
@@ -1171,16 +1143,16 @@ def run_custom_path_query():
                         
                         csv = results_df.to_csv(index=False)
                         st.download_button(
-                            "📥 Download Results CSV",
+                            "Download Results CSV",
                             csv,
                             "path_query_results.csv",
                             "text/csv"
                         )
                         
                     except Exception as e:
-                        st.error(f"❌ Error computing paths: {e}")
+                        st.error(f"Error computing paths: {e}")
     else:
-        st.info("👆 Load a dataset from the sidebar to begin querying paths")
+        st.info("Load a dataset from the sidebar to begin querying paths")
 
 if __name__ == "__main__":
     main()
